@@ -1,0 +1,429 @@
+<?xml version="1.0" encoding="UTF-8" ?> 
+<!--
+Author: Michal Aichinger, michal.aichinger@gmail.com
+Copyright: CC-BY-SA
+http://creativecommons.org/licenses/by-sa/3.0
+ -->
+<Module>
+<ModulePrefs title="State Example" height="400">
+  <Require feature="wave-preview" /> 
+</ModulePrefs>
+<Content type="html">
+<![CDATA[ 
+<head>
+    <meta name="viewport" content="initial-scale=1.0, user-scalable=no" />
+    <script type="text/javascript" src="http://maps.google.com/maps/api/js?sensor=false"></script>
+    <script type="text/javascript" src="http://code.google.com/intl/cs-CZ/apis/gears/gears_init.js"></script>
+
+    <style  type="text/css" media="screen">
+        #map             {height: 300px;}
+        #title           {margin: 10px 0 5px 0;}
+        #messages        {font-size: 11px; height: 13px; color: #c00;}
+        #legend          {margin-top: 3px; font-size: 12px;}
+        #legend img      {vertical-align: bottom;}
+        #positionFuzzyBox{ width: 360px; background: #ccc; position: absolute; top: 200px; left: 20px; display: none;}
+    </style>
+</head>
+<body>
+    <div id="content">
+        <p id="title">Zobrazení polohy uživatelů</p>
+        <div id="controls">
+            <button id="addViewerPosition" onclick="app.addViewerPosition();">Přidej moji polohu</button>
+            <button id="findNearest" onclick="app.findNearest();">Najdi nejbližšího</button>
+            <button id="showAll" onclick="app.showAll();">Zobraz všechny</button>
+        </div>
+        <div id="messages"></div>
+        <div id="map"></div>
+        <div id="legend">
+            <img src="http://www.czechdesign.cz/open/gb15.png" /> moje poloha, 
+            <img src="http://www.czechdesign.cz/open/rb15.png" /> poloha zadaná přes geolocation,
+            <img src="http://www.czechdesign.cz/open/yb15.png" /> poloha zadaná ručně.
+        </div>
+        
+        <div id="positionFuzzyBox">
+            <p>Vaše poloha může být zaměřena až na 150m, vaší vaší polohu můžeme znepřesnit.</p>
+            <button id="fuzzy" onclick="app.fuzzyPosition();">Znepřesnit polohu</button>
+            <button id="ok" onclick="app.leavePosition();">Nechat polohu jak je</button>
+            <button id="close" onclick="document.getElementById('positionFuzzyBox').style.display='none';">Zavřít</button>
+        </div>
+        <script type="text/javascript">
+            bind = function(obj,fnc){
+            	return function() {
+            		return fnc.apply(obj,arguments);
+            	}
+            };
+    
+        
+            function Application() {
+                this.map = null;
+                this.dom = {};
+                this.dom.msg = document.getElementById('messages');
+                this.dom.fuzzyBox = document.getElementById('positionFuzzyBox');
+                this.stateName = 'aichiStateHolder';
+                this.host = null;
+                this.viewer = null;
+                this.inited = false;
+                
+                this.R = 6371; // km, prumer zeme
+                this.clickableMap = false;
+                this.marks = []; //pole vsech marku
+                this.infos = [];
+                
+                this.init = bind(this, this.init);
+                this.stateUpdated = bind(this, this.stateUpdated);
+                this.addViewerPosition = bind(this, this.addViewerPosition);
+                this.setViewerPositionState = bind(this, this.setViewerPositionState);
+                this.findNearest = bind(this, this.findNearest);
+                this.showAll = bind(this, this.showAll);
+                this._clickedPosition = bind(this, this._clickedPosition);
+                this.fuzzyPosition = bind(this, this.fuzzyPosition);
+                this.leavePosition = bind(this, this.leavePosition);
+                this.showFuzzyBox = bind(this, this.showFuzzyBox);
+            }
+        
+            /**
+             * init po nacteni gadgetu
+             */                 
+            Application.prototype.init = function() {
+                //console.log('init start');
+                if (wave && wave.isInWaveContainer()) {
+                    wave.setStateCallback(this.stateUpdated);
+                }
+                
+                //praha
+                var lat = 50.083;
+                var lon = 14.467;
+                var latlng = new google.maps.LatLng(lat, lon);
+            
+                var myOptions = {
+                    zoom: 8,
+                    center: latlng,
+                    mapTypeControl: true,
+                    navigationControl: false,
+                    scaleControl: false,
+                    mapTypeId: google.maps.MapTypeId.ROADMAP
+                };
+            
+                this.map = new google.maps.Map(document.getElementById("map"),myOptions);
+                google.maps.event.addListener(this.map, 'click', this._clickedPosition);
+                //console.log(this.map);
+            }
+            
+            /**
+             * volano pokazde, kdyz se zmeni stav ve vlne
+             */         
+            Application.prototype.stateUpdated = function() {
+                //console.log('start updated');
+                
+                this.host = wave.getHost();
+                this.viewer = wave.getViewer();
+    
+                //zobrazeni pozic vsech                
+                this._showPositions();
+                
+                this.inited = true;
+            }
+            
+            /**
+             * udalost na tlacitku
+             */                 
+            Application.prototype.addViewerPosition = function() {
+                //console.log('addViewerPosition()');
+                if (navigator.geolocation) {  
+                    /* firefox geolocation is available */
+                    //console.log('firefox');
+                    navigator.geolocation.getCurrentPosition(this.showFuzzyBox);
+                } else if (google && google.gears) {
+                    /* gears geolocation is aviable */
+                    //console.log('gears');
+                    var geo = google.gears.factory.create('beta.geolocation');
+                    geo.getCurrentPosition(this.showFuzzyBox, this._showGeoLocationError);
+                } else {  
+                    this.dom.msg.innerHTML = 'Vyznačte svou polohu kliknutím do mapy.';
+                    this.clickableMap = true;
+            
+                }  
+            }
+            
+            Application.prototype._clickedPosition = function(event) {
+                if(this.clickableMap) {
+                    this.clickableMap = false;
+                    this.dom.msg.innerHTML = '';
+                    var position = {};
+                    position.latitude = event.latLng.lat();
+                    position.longitude = event.latLng.lng();
+                    position.id = this.viewer.getId();
+                    position.state = 'manual';
+                    this.setViewerPositionState(position);
+                }
+            }
+            
+           
+            /**
+             * zobrazeni pozice na mape
+             */                        
+            Application.prototype._showPositions = function() {
+                //console.log('_showPositions()');
+                
+                this.clearInfosAndMarks();
+                
+                
+                //zobrazeni vsech na mape
+                var state = this.getPositionState();
+                for (var i in state) {
+                    //console.log(i);
+                
+                    var participant = wave.getParticipantById(state[i].id);
+                    //participant muze byt ulozen, ale uz nemusi byt ve vlne
+                    if (participant) {
+                        var position = state[i];
+                        //console.log(participant);
+                        
+                        //nastaveni pozice na mape
+                        var p = new google.maps.LatLng(position.latitude, position.longitude);
+                        
+                        //zobrazuji poprve a jeste neni doinicializovano, tak vycentruji mapu na muj bod
+                        if (!this.inited && this.viewer.getId() == participant.getId()) {
+                            this.map.setCenter(p);
+                        }
+                                                                       
+                        //zobrazeni ikony cloveka na mape
+                        //zelene je ten kdo se diva, cervene jsou ostatni
+                        var markerImgUrl = 'http://www.czechdesign.cz/open/rb15.png';
+                        if (this.viewer.getId() == participant.getId()) {
+                            markerImgUrl = 'http://www.czechdesign.cz/open/gb15.png';
+                        } else if (position.state && position.state == 'manual'){
+                            markerImgUrl = 'http://www.czechdesign.cz/open/yb15.png';
+                        }
+                        //zobrazeni puntiku
+                        var m1 = new google.maps.Marker({
+                            position: p, 
+                            visible: true, 
+                            title: participant.getDisplayName(),
+                            icon: new google.maps.MarkerImage(
+                                markerImgUrl,
+                                new google.maps.Size(15,15,'px', 'px'),
+                                new google.maps.Point(0,0),
+                                new google.maps.Point(8, 8)
+                            ),
+                            map: this.map
+                        });
+                        
+                        this.marks.push(m1);
+                        
+                        var info = new Info(participant.getDisplayName(), participant.getThumbnailUrl(), m1, this.map);                        
+                        this.infos.push(info);
+                        
+                        google.maps.event.addListener(m1, 'click', info.click);
+                    }
+                }
+                //console.log('_showPositions() done');
+            }
+            
+            /**
+             * smazani starych bodu a info bublin
+             */                         
+            Application.prototype.clearInfosAndMarks = function() {
+                
+                for (var i = 0; i < this.infos.length; i++) {
+                    this.infos[i].destroy;
+                    this.infos[i] = null;
+                }
+                this.infos = [];
+                for (var i = 0; i < this.marks.length; i++) {
+                    this.marks[i].setMap(null);
+                    this.marks[i] = null;
+                }
+                this.marks = [];
+            }
+            
+            Application.prototype._showGeoLocationError = function() {
+                this.dom.msg.innerHTML = 'Geolokace se nezdařila.';
+            }
+            
+            /**
+             * ulozeni souradnic toho kdo to zadal a nasmerovani mapy
+             * na toto misto, po ulozeni pozice do state a vyvolani
+             * udalosti se tam nakresli tecka                          
+             */                 
+            Application.prototype.setViewerPositionState = function(position) {
+                //console.log('setViewerPositionState()');
+                var position = position.coords || position;
+                //console.log('position');
+                
+                //nastaveni pozice na mape
+                var p = new google.maps.LatLng(position.latitude, position.longitude);
+                this.map.setCenter(p);
+                //this.map.setZoom(13);
+                
+                var state = this.getPositionState();
+                //console.log('state');
+                //console.log(state);
+                var viewer = wave.getViewer();
+                state[this.createName(viewer.getId())] = {id: viewer.getId(), latitude: position.latitude, longitude: position.longitude, state: (position.state) ? position.state: 'geo' };
+                
+                var serializedState = wave.util.printJson(state)+'';
+                //console.log(serializedState);
+                var delta = {};
+                delta[this.stateName] = serializedState;
+                wave.getState().submitDelta(delta);
+                
+                //console.log('setViewerPositionState() done');
+            } 
+            
+            /**
+             * ziskani stavu vsech pozic
+             */                 
+            Application.prototype.getPositionState = function() {
+                //console.log('getPositionState()');
+                var value = wave.getState().get(this.stateName, '{}');
+                eval('var state = '+value+';');
+                //console.log(state);
+                return state;
+            }
+            
+            /**
+             * vytvoreni klice z ID uzivatele
+             */                 
+            Application.prototype.createName = function(name) {
+                return name.replace(/[^a-z]/gi, '');
+            }
+    
+            
+            /**
+             * na klik na tlacitko zobrazeni nejblizsiho souseda
+             */                         
+            Application.prototype.findNearest = function() {
+                var state = this.getPositionState();
+                //zjistim vlastni polohu
+                var myId = this.createName(this.viewer.getId());
+                var myPosition = state[myId];
+                if (myPosition) {
+                    var distance = Infinity;
+                    var nearest = null;
+                    for (var i in state) {
+                        //nejsem ja
+                        if (myId != i) {
+                            var position = state[i];
+                            var d = this._computeDistance(myPosition, position);
+                            if (d < distance) {
+                                nearest = state[i];
+                                distance = d;
+                            }
+                        }
+                    }
+                    
+                    //nekoho jsem nasel
+                    if (nearest) {
+                        var myPos = new google.maps.LatLng(myPosition.latitude,myPosition.longitude);
+                        var nearestPos = new google.maps.LatLng(nearest.latitude,nearest.longitude);
+                        var llb = new google.maps.LatLngBounds(myPos, nearestPos);
+            
+                        this.map.fitBounds(llb);
+                        this.map.setCenter(myPos);
+                        this.map.setZoom(this.map.getZoom() == 1 ? 1 : this.map.getZoom()-1);                    
+                    }
+                } else {
+                    alert('Pro zobrazení nejbližšího, musí uložit svojí pozici.');
+                }
+            };
+                                    
+            /** 
+             * vypocet vzdalenosti mezi dvema body na kouli - Spherical Law of Cosines
+             * http://www.movable-type.co.uk/scripts/latlong.html 
+             */                          
+            Application.prototype._computeDistance = function(position1, position2) {
+                var lat1 = position1.latitude;
+                var lon1 = position1.longitude;
+                var lat2 = position2.latitude;
+                var lon2 = position2.longitude; 	
+            
+                var R = this.R;
+                var d = Math.acos(Math.sin(lat1)*Math.sin(lat2) + Math.cos(lat1)*Math.cos(lat2) * Math.cos(lon2-lon1)) * R;
+                return d; //km
+            }
+                        
+            /**
+             * zobrazeni vsech na mape
+             */                         
+            Application.prototype.showAll = function() {
+                var llb = new google.maps.LatLngBounds();
+                
+                var state = this.getPositionState();
+                for (var i in state) {
+                    var position = state[i];
+                    llb.extend(new google.maps.LatLng(position.latitude, position.longitude));
+                }
+                
+                if (!llb.isEmpty()) {
+                    this.map.fitBounds(llb);
+                } else {
+                    alert('Pro zobrazení všech, musí být uloženy alespoň dvě pozice.');
+                }
+            };
+            
+            /**
+             * zobrazeni boxiku pro moznost znepresneni pozice
+             */                         
+            Application.prototype.showFuzzyBox = function(position) {
+                this.position = position.coords || position;
+                this.dom.fuzzyBox.style.display = 'block';
+            }
+            
+            /**
+             * znepresnuji pozici
+             */                         
+            Application.prototype.fuzzyPosition = function(){
+                this.dom.fuzzyBox.style.display='none';
+                var position = {}
+                position.latitude = this.position.latitude + Math.random()* 0.1 * (Math.random() > 0.5 ? 1 : -1 );
+                position.longitude = this.position.longitude + Math.random()* 0.1 * (Math.random() > 0.5 ? 1 : -1 );
+                this.setViewerPositionState(position);
+            }
+            
+            /**
+             * nechavam pozici namerenou tak jak je
+             */                         
+            Application.prototype.leavePosition = function(){
+                this.dom.fuzzyBox.style.display='none';
+                this.setViewerPositionState(this.position);
+            }
+            
+            /**
+             * @class Info
+             * objekt tvorici vizitku po kliku na bod             
+             */                         
+            function Info (name, src, mark, map) {
+                this.name = name;
+                this.src = src;
+                this.mark = mark;
+                this.map = map;
+                
+                this.click = bind(this, this.click);
+            }
+            
+            Info.prototype.click = function() {
+                var i = new google.maps.InfoWindow({
+                    content: '<div><strong>'+this.name+'</strong></div><img src="'+this.src+'" />'
+                });
+                
+                i.open(this.map, this.mark);
+            }
+            
+            Info.prototype.destroy = function() {
+                for (p in this) {
+                    this[p] = null;
+                }
+            }
+            
+            
+            
+            var app = new Application();
+            gadgets.util.registerOnLoadHandler(app.init);
+        </script>
+    </div>
+    
+</body>    
+  ]]> 
+  </Content>
+</Module>
